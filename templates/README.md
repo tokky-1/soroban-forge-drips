@@ -6,6 +6,7 @@ for the template format and how to add a new one.
 
 - `hello-world` — minimal greeter contract
 - `nft` — non-fungible token with metadata, minting and burning
+- `nft-marketplace` — NFT marketplace for listing, buying, and cancelling sales with configurable treasury fees
 - `token` — SEP-41 fungible token (`soroban_sdk::token::TokenInterface`)
 - `crowdfund` — escrow/deadline crowdfunding example
 - `upgradeable` — admin-gated upgradeable contract (`update_current_contract_wasm`)
@@ -17,6 +18,7 @@ for the template format and how to add a new one.
 - `amm` — constant-product AMM / liquidity pool
 - `atomic-swap` — atomic two-party token swap
 - `crowdfund` — escrow/deadline crowdfunding example
+- `dutch-auction` — descending-price auction with linear price decay
 - `escrow` — token escrow with approval or timeout-based refund
 - `faucet` — token faucet with per-address cooldown
 - `governance` — DAO governance with weighted voting and quorum
@@ -27,6 +29,7 @@ for the template format and how to add a new one.
 - `staking` — proportional reward staking with O(1) `acc_reward_per_share` accumulator
 - `streaming` — streams tokens linearly over time with cancel support
 - `subscription` — recurring payment charged once per elapsed interval
+- `timelock` — timelock controller for delayed execution and cancellation of queued calls
 - `vesting` — token vesting with cliff + linear release schedule
 - `wrapped-asset` — 1:1 wrapper token minted on deposit, burned on withdraw
 - `english-auction` — ascending-bid auction with seller settlement

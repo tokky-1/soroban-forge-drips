@@ -1,0 +1,9 @@
+description = "cross-contract calls with authorization propagation (two-contract workspace)"
+
+[post_generate]
+hints = [
+  "this is a workspace with two contracts: 'receiver' and 'caller'",
+  "run 'cd receiver && cargo test' and 'cd caller && cargo test' to test individually",
+  "or run 'cargo test --all' from the root to test both",
+  "the caller contract demonstrates how to invoke the receiver contract and propagate authorization",
+]

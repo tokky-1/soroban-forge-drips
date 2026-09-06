@@ -82,6 +82,7 @@ mod tests {
             .map(|(name, description)| TemplateInfo {
                 name,
                 description: description.to_string(),
+                variables: Vec::new(),
             })
             .collect()
     }

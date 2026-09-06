@@ -5,6 +5,7 @@ List them at any time with `soroban-forge templates`:
 - `amm` – constant-product AMM / liquidity pool (x*y=k, 0.3% fee)
 - `atomic-swap` – atomic two-party token swap with dual authorization
 - `crowdfund` – escrow/deadline crowdfunding contract
+- `dutch-auction` – descending-price auction with linear price decay and immediate settlement
 - `escrow` – token escrow with approval or timeout-based refund path
 - `flash-loan` – uncollateralized single-transaction loan repaid via a borrower callback
 - `governance` – DAO governance with weighted voting, quorum, and proposal execution
@@ -12,7 +13,9 @@ List them at any time with `soroban-forge templates`:
 - `multisig` – M-of-N multisig account contract (`CustomAccountInterface`)
 - `nft` – NFT with per-token metadata and minting
 - `prediction-market` – binary outcome market with oracle resolution and parimutuel payouts
+- `nft-marketplace` – NFT marketplace for listing, buying, and cancelling sales with configurable fees
 - `token` – SEP-41 fungible token (`soroban_sdk::token::TokenInterface`)
+- `timelock` – timelock controller for delayed execution and cancellation of queued calls
 - `vesting` – token vesting with cliff + linear release schedule
 
 ## Variables
@@ -69,7 +72,9 @@ description; `soroban-forge new <name> --template <t>` scaffolds one.
 | `hello-world`      | minimal greeter contract (recommended starting point)            |
 | `token`            | SEP-41 fungible token (`soroban_sdk::token::TokenInterface`)     |
 | `nft`              | non-fungible token with per-token metadata and minting           |
+| `nft-marketplace`  | NFT marketplace for listing, buying, and cancelling sales        |
 | `crowdfund`        | escrow/deadline crowdfunding contract                            |
+| `dutch-auction`    | descending-price auction with linear price decay                 |
 | `escrow`           | token escrow with approval or timeout-based refund path          |
 | `vesting`          | token vesting with cliff + linear release schedule               |
 | `payment-splitter` | splits received funds between payees by fixed shares             |
@@ -81,6 +86,7 @@ description; `soroban-forge new <name> --template <t>` scaffolds one.
 | `governance`       | DAO governance with weighted voting, quorum and execution        |
 | `multisig`         | M-of-N multisig account contract (`CustomAccountInterface`)      |
 | `prediction-market`| binary outcome market with oracle resolution and parimutuel payouts |
+| `timelock`         | timelock controller for delayed execution and cancellation       |
 
 Every template ships a `README.md` with build/deploy instructions and unit
 tests that pass out of the box:
@@ -147,6 +153,28 @@ generated README says so: there is no staking deadline, so the market accepts
 stakes until the moment it resolves; and if the oracle resolves to an outcome
 nobody backed there are no winners, so the pool stays put and every `claim`
 reports `NothingToClaim`.
+## Dutch auction
+
+The seller initializes the auction with `start_price`, `floor_price`, and
+`duration_seconds`, then deposits the asset via `fund`. The price decays linearly
+from `start_price` to `floor_price` over the duration. The first buyer to call
+`buy` purchases the asset at the current price, which immediately transfers the
+asset to the buyer and the payment to the seller.
+
+## Timelock controller
+
+Enforces a minimum time delay between queueing an operation (contract call, function,
+arguments, and salt) and executing it. Proposers queue calls with `delay >= min_delay`,
+and executors trigger the call once the delay has elapsed. Proposers or admins can
+cancel queued operations before execution.
+## NFT marketplace
+
+Sellers list NFTs from any contract conforming to the `nft` template's interface,
+specifying a payment token (SEP-41) and price. The NFT is escrowed in the
+marketplace during the listing. Buyers purchase NFTs at the listed price, with a
+configurable basis-point protocol fee automatically routed to a treasury address
+and the remainder sent to the seller. Sellers can cancel open listings at any time
+to reclaim their NFT.
 ## Flash loan
 
 `flash_loan` snapshots the pool's balance, transfers the principal to the

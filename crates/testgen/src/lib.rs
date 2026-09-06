@@ -741,6 +741,7 @@ pub fn build_event_test(info: &ContractInfo) -> String {
             let mut vars = Vars::new();
             vars.insert("contract_type".into(), ct.clone());
             vars.insert("fn_name".into(), to_snake_case(ct));
+            vars.insert("contract_args".into(), info.constructor_args.clone());
 
             let mut event_tests = String::new();
             event_tests.push_str(&format!(
@@ -1340,6 +1341,7 @@ pub fn generate_with(
     dir: &Path,
     options: &GenerateOptions,
 ) -> Result<(ContractInfo, Vec<&'static str>)> {
+    generate_with_options_layout(dir, options, TestLayout::default())
     let GenerateOptions {
         force,
         fuzz,
@@ -1366,6 +1368,22 @@ pub fn generate_with_layout(
     budget: bool,
     budget_entrypoint: Option<&str>,
 ) -> Result<(ContractInfo, Vec<&'static str>)> {
+    generate_with_options_layout(dir, &GenerateOptions::new(force, fuzz), layout)
+}
+
+pub fn generate_with_options_layout(
+    dir: &Path,
+    options: &GenerateOptions,
+    layout: TestLayout,
+) -> Result<(ContractInfo, Vec<&'static str>)> {
+    generate_with_options_layout(dir, &GenerateOptions::new(force, fuzz), layout)
+}
+
+pub fn generate_with_options_layout(
+    dir: &Path,
+    options: &GenerateOptions,
+    layout: TestLayout,
+) -> Result<(ContractInfo, Vec<&'static str>)> {
     let info = detect::inspect(dir)?;
 
     let smoke = build_smoke_test(&info);
@@ -1373,9 +1391,6 @@ pub fn generate_with_layout(
     let snapshot = build_snapshot_test(&info);
     let event_test = build_event_test(&info);
     let init_once = build_init_once_test(&info);
-    let err_tests = build_error_path_tests(&info);
-    let reentry = build_reentrancy_test(&info);
-
     let ttl_test = build_ttl_test(&info);
     // Empty unless the contract exposes an upgrade entrypoint (#234).
     let upgrade_test = build_upgrade_test(&info);
@@ -1442,6 +1457,8 @@ pub fn generate_with_layout(
         files.push(("tests/forge_init_once.rs", init_once));
     }
 
+    if options.budget {
+        let budget_test = build_budget_test(&info, options.budget_entrypoint.as_deref())?;
     if budget {
         let budget_test = build_budget_test(&info, budget_entrypoint)?;
         if budget_test.is_empty() {
@@ -1453,7 +1470,7 @@ pub fn generate_with_layout(
         files.push(("tests/forge_budget.rs", budget_test));
     }
 
-    if fuzz {
+    if options.fuzz {
         let mut vars = Vars::new();
         vars.insert("crate_name".into(), info.crate_name.clone());
         files.push(("fuzz/Cargo.toml", render_str(FUZZ_CARGO_TOML, &vars)));
@@ -1466,7 +1483,7 @@ pub fn generate_with_layout(
     let mut written = Vec::new();
     for (rel, contents) in files {
         let path = dir.join(rel);
-        if path.exists() && !force {
+        if path.exists() && !options.force {
             return Err(ForgeError::AlreadyExists(path));
         }
         if let Some(parent) = path.parent() {
@@ -1666,9 +1683,9 @@ impl ForgePlugin for TestgenPlugin {
                     .default_missing_value("")
                     .value_name("ENTRYPOINT")
                     .help("Emit a benchmark test measuring an entrypoint's CPU/memory cost [default: the first entrypoint]"),
-              )
-              .arg(
-                  Arg::new("layout")
+            )
+            .arg(
+                Arg::new("layout")
                     .long("layout")
                     .value_name("LAYOUT")
                     .default_value("tests")
@@ -1722,6 +1739,7 @@ impl ForgePlugin for TestgenPlugin {
         };
 
         let budget_arg = matches.get_one::<String>("budget");
+        let layout = TestLayout::parse(matches.get_one::<String>("layout").expect("has default"))?;
         let options = GenerateOptions {
             force: matches.get_flag("force"),
             fuzz: matches.get_flag("fuzz"),
@@ -1736,7 +1754,7 @@ impl ForgePlugin for TestgenPlugin {
         // Workspace root: generate a harness per member.
         if is_workspace(&dir) {
             let results =
-                generate_workspace_with_layout(&dir, matches.get_flag("force"), fuzz, layout)?;
+                generate_workspace_with_layout(&dir, options.force, fuzz, layout)?;
             if ctx.json {
                 let members: Vec<serde_json::Value> = results
                     .iter()
@@ -1766,6 +1784,7 @@ impl ForgePlugin for TestgenPlugin {
             return Ok(());
         }
 
+        let (info, written) = generate_with_layout(&dir, options.force, fuzz, layout)?;
         let (info, written) = generate_with_layout(
             &dir,
             matches.get_flag("force"),
@@ -1798,7 +1817,7 @@ impl ForgePlugin for TestgenPlugin {
         // --coverage: write the llvm-cov script alongside the harness.
         let coverage = matches.get_flag("coverage");
         if coverage {
-            let cov_rel = write_coverage_script(&dir, matches.get_flag("force"))?;
+            let cov_rel = write_coverage_script(&dir, options.force)?;
             if !ctx.quiet && !ctx.json {
                 println!("wrote {cov_rel}");
                 println!();

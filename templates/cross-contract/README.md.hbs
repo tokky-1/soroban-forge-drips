@@ -1,0 +1,140 @@
+# Cross-Contract Call Example
+
+A two-contract Soroban project demonstrating:
+
+- **Contract-to-contract invocation** — using a generated client to call another contract
+- **Authorization propagation** — how `require_auth()` in called contracts works with cross-contract calls
+- **Workspace structure** — organizing multiple contracts with shared dependencies
+
+```sh
+forge new my-cross-contract --template cross-contract
+```
+
+## Architecture
+
+- **receiver** — A simple contract with an `authorized_action()` function that calls `require_auth()`.
+- **caller** — Invokes the receiver contract and demonstrates how authorization flows through the call boundary.
+
+## How Authorization Propagates
+
+In Soroban, when contract A calls contract B, and contract B calls `require_auth()` on some address:
+
+1. The address must be present in the original transaction's `auth_entries`
+2. That authorization automatically satisfies the `require_auth()` in contract B, even though contract A is the direct caller
+3. This allows a chain of contracts to enforce permissions without duplicating auth logic
+
+## Building
+
+Build both contracts:
+
+```sh
+cargo build --release
+```
+
+Build individual contracts:
+
+```sh
+cargo build -p receiver --release
+cargo build -p caller --release
+```
+
+## Testing
+
+Run all tests:
+
+```sh
+cargo test --all
+```
+
+Run tests for a specific contract:
+
+```sh
+cargo test -p receiver
+cargo test -p caller
+```
+
+## Key Code Patterns
+
+### Receiver Contract (lib.rs)
+
+```rust
+pub fn authorized_action(env: Env, caller: Address, message: Symbol) -> Symbol {
+    // Verify that caller has authorized this action
+    caller.require_auth();
+    
+    env.events().publish(("receiver", "action"), (&caller, &message));
+    message
+}
+```
+
+### Caller Contract (lib.rs)
+
+```rust
+pub fn invoke_receiver(
+    env: Env,
+    receiver_address: Address,
+    target_user: Address,
+    message: Symbol,
+) -> Symbol {
+    // Create a client for the receiver contract
+    let receiver = ReceiverClient::new(&env, &receiver_address);
+
+    // Call the receiver's authorized_action method
+    // target_user's authorization requirement propagates to this transaction
+    let result = receiver.authorized_action(&target_user, &message);
+
+    env.events()
+        .publish(("caller", "invoked_receiver"), (&target_user, &message));
+
+    result
+}
+```
+
+### Testing Cross-Contract Calls
+
+```rust
+#[test]
+fn test_cross_contract_call_with_auth() {
+    let env = Env::default();
+    env.mock_all_auths();  // Enable authorization in tests
+
+    let receiver_contract = env.register(Receiver, ());
+    let caller_contract = env.register(Caller, ());
+
+    let caller = CallerClient::new(&env, &caller_contract);
+    let authorized_user = Address::generate(&env);
+    let message = symbol_short!("hello");
+
+    // The test environment's mock_all_auths() automatically satisfies
+    // the require_auth() call in the receiver contract
+    let result = caller.invoke_receiver(&receiver_contract, &authorized_user, &message);
+    assert_eq!(result, message);
+}
+```
+
+## Workspace Structure
+
+This is a Cargo workspace with two crates sharing common dependencies:
+
+```toml
+[workspace]
+members = ["receiver", "caller"]
+
+[workspace.dependencies]
+soroban-sdk = "{{sdk_version}}"
+```
+
+Each crate's `Cargo.toml` references workspace-defined versions to keep them in sync.
+
+## Next Steps
+
+1. Add more functions to the receiver contract
+2. Create additional contracts and chain calls through multiple layers
+3. Implement error handling and validation logic in each contract
+4. Deploy to testnet and test with real authorization flows
+
+## Learn More
+
+- [Soroban Interoperability Docs](https://docs.rs/soroban-sdk/)
+- [Authorization & Smart Contracts](https://stellar.org/docs/learn/authorization)
+- [Contract Testing](https://stellar.org/docs/smart-contracts/testing)

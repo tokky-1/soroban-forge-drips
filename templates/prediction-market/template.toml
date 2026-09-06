@@ -1,0 +1,8 @@
+description = "binary outcome market with oracle resolution and parimutuel payouts"
+
+[post_generate]
+hints = [
+  "deploy args: --oracle <ADDRESS> --token <ADDRESS>",
+  "only the oracle address can call resolve() — pick it before deploying, it is fixed at construction",
+  "outcomes are booleans: true = YES, false = NO",
+]

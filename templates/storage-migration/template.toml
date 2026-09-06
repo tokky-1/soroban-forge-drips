@@ -1,0 +1,9 @@
+description = "storage migration from v1 to v2 with version-marker pattern"
+
+[post_generate]
+hints = [
+  "this template demonstrates migrating storage layouts across contract upgrades",
+  "run 'cargo test' to see the migration in action",
+  "the version marker pattern prevents running the migration multiple times",
+  "see README.md for architecture and migration strategy",
+]

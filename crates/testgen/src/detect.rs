@@ -151,7 +151,7 @@ pub fn inspect(dir: &Path) -> Result<ContractInfo> {
         has_token_deps,
         token_param_names,
         init_method,
-          has_persistent_storage: detect_persistent_storage(&source),
+        has_persistent_storage: detect_persistent_storage(&source),
     })
 }
 
@@ -537,23 +537,29 @@ pub fn find_methods(source: &str) -> (Vec<MethodInfo>, Option<Vec<(String, Strin
 pub fn find_events(source: &str) -> Vec<EventInfo> {
     let mut events = Vec::new();
 
-    let mut tokens = Vec::new();
+    // Tokenize into (token_str, start_byte, end_byte)
+    let mut tokens: Vec<(String, usize, usize)> = Vec::new();
     let mut current_word = String::new();
-    for c in source.chars() {
+    let mut word_start = 0;
+
+    for (i, c) in source.char_indices() {
         if c.is_alphanumeric() || c == '_' {
+            if current_word.is_empty() {
+                word_start = i;
+            }
             current_word.push(c);
         } else {
             if !current_word.is_empty() {
-                tokens.push(current_word.clone());
+                tokens.push((current_word.clone(), word_start, i));
                 current_word.clear();
             }
             if !c.is_whitespace() {
-                tokens.push(c.to_string());
+                tokens.push((c.to_string(), i, i + c.len_utf8()));
             }
         }
     }
     if !current_word.is_empty() {
-        tokens.push(current_word);
+        tokens.push((current_word, word_start, source.len()));
     }
 
     let mut i = 0;
@@ -562,22 +568,22 @@ pub fn find_events(source: &str) -> Vec<EventInfo> {
     let mut in_contract_impl = false;
 
     while i < tokens.len() {
-        if tokens[i] == "#"
+        if tokens[i].0 == "#"
             && i + 3 < tokens.len()
-            && tokens[i + 1] == "["
-            && tokens[i + 2] == "contractimpl"
-            && tokens[i + 3] == "]"
+            && tokens[i + 1].0 == "["
+            && tokens[i + 2].0 == "contractimpl"
+            && tokens[i + 3].0 == "]"
         {
             in_contract_impl = true;
             i += 4;
             continue;
         }
 
-        if in_contract_impl && tokens[i] == "{" {
+        if in_contract_impl && tokens[i].0 == "{" {
             brace_depth += 1;
         }
 
-        if in_contract_impl && tokens[i] == "}" {
+        if in_contract_impl && tokens[i].0 == "}" {
             brace_depth -= 1;
             if brace_depth == 0 {
                 in_contract_impl = false;
@@ -585,51 +591,52 @@ pub fn find_events(source: &str) -> Vec<EventInfo> {
             }
         }
 
-        // Track which method we are in at the outermost brace depth inside
-        // a contractimpl block.
-        if in_contract_impl && brace_depth == 1 && tokens[i] == "fn" && i + 2 < tokens.len() {
-            current_method = Some(tokens[i + 1].clone());
+        if in_contract_impl && brace_depth == 1 && tokens[i].0 == "fn" && i + 2 < tokens.len() {
+            current_method = Some(tokens[i + 1].0.clone());
         }
 
-        // Detect `env.events().publish(...)` pattern.
+        // Detect `env.events().publish(...)` pattern across line breaks.
         if in_contract_impl
-            && tokens[i] == "env"
-            && i + 5 < tokens.len()
-            && tokens[i + 1] == "."
-            && tokens[i + 2] == "events"
-            && tokens[i + 3] == "("
-            && tokens[i + 4] == ")"
-            && i + 6 < tokens.len()
-            && tokens[i + 5] == "."
-            && tokens[i + 6] == "publish"
+            && tokens[i].0 == "env"
             && i + 7 < tokens.len()
-            && tokens[i + 7] == "("
+            && tokens[i + 1].0 == "."
+            && tokens[i + 2].0 == "events"
+            && tokens[i + 3].0 == "("
+            && tokens[i + 4].0 == ")"
+            && tokens[i + 5].0 == "."
+            && tokens[i + 6].0 == "publish"
+            && tokens[i + 7].0 == "("
         {
             if let Some(method) = &current_method {
+                let open_paren_end = tokens[i + 7].2;
                 let mut depth = 1;
                 let mut j = i + 8;
-                let mut paren_content = String::new();
+                let mut close_paren_start = None;
+
                 while j < tokens.len() && depth > 0 {
-                    if tokens[j] == "(" {
+                    if tokens[j].0 == "(" {
                         depth += 1;
-                    } else if tokens[j] == ")" {
+                    } else if tokens[j].0 == ")" {
                         depth -= 1;
                         if depth == 0 {
+                            close_paren_start = Some(tokens[j].1);
                             break;
                         }
                     }
-                    paren_content.push_str(&tokens[j]);
                     j += 1;
                 }
 
-                let (topics, data) = parse_publish_args(&paren_content);
-                events.push(EventInfo {
-                    method: method.clone(),
-                    topics,
-                    data,
-                });
+                if let Some(end) = close_paren_start {
+                    let paren_content = &source[open_paren_end..end];
+                    let (topics, data) = parse_publish_args(paren_content);
+                    events.push(EventInfo {
+                        method: method.clone(),
+                        topics,
+                        data,
+                    });
+                }
             }
-            i = i + 8;
+            i += 8;
             continue;
         }
 
@@ -673,13 +680,13 @@ fn parse_publish_args(args: &str) -> (Vec<String>, Option<String>) {
 
     if let Some(pos) = split_pos {
         let topics_str = args[..pos].trim();
-        let data_str = args[pos + 1..].trim();
+        let data_str = args[pos + 1..].trim().trim_end_matches(',').trim();
         topics = split_topics(topics_str);
         if !data_str.is_empty() {
             data = Some(data_str.to_string());
         }
     } else {
-        topics = split_topics(args);
+        topics = split_topics(args.trim_end_matches(',').trim());
     }
 
     (topics, data)
@@ -916,10 +923,10 @@ impl TokenContract {
         let events = find_events(src);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].method, "mint");
-        assert_eq!(events[0].topics, vec!["(symbol_short!(\"mint\"))", "to"]);
+        assert_eq!(events[0].topics, vec!["symbol_short!(\"mint\")", "to"]);
         assert_eq!(events[0].data, Some("amount".to_string()));
         assert_eq!(events[1].method, "burn");
-        assert_eq!(events[1].topics, vec!["(symbol_short!(\"burn\"))", "from"]);
+        assert_eq!(events[1].topics, vec!["symbol_short!(\"burn\")", "from"]);
         assert_eq!(events[1].data, Some("amount".to_string()));
     }
 
@@ -941,7 +948,7 @@ impl TokenContract {
         assert_eq!(events[0].method, "approve");
         assert_eq!(
             events[0].topics,
-            vec!["(symbol_short!(\"approve\"))", "from", "spender"]
+            vec!["symbol_short!(\"approve\")", "from", "spender"]
         );
         assert_eq!(events[0].data, Some("(amount, 100u32)".to_string()));
     }
@@ -1006,7 +1013,7 @@ impl Contract {
         let events = find_events(src);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].method, "close");
-        assert_eq!(events[0].topics, vec!["(symbol_short!(\"close\"),)"]);
+        assert_eq!(events[0].topics, vec!["symbol_short!(\"close\")"]);
         assert_eq!(events[0].data, Some("()".to_string()));
     }
 
@@ -1091,7 +1098,7 @@ impl Demo {
             init.args,
             vec![("admin".to_string(), "Address".to_string())]
         );
-      }
+    }
 
     #[test]
     fn detects_persistent_storage_usage() {

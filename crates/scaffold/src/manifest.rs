@@ -22,7 +22,7 @@
 //! required = true
 //! ```
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use soroban_forge_core::render::Vars;
 use soroban_forge_core::{ForgeError, Result};
 
@@ -41,7 +41,7 @@ pub const RESERVED_VARS: &[&str] = &[
 ];
 
 /// One custom variable declared by a template.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemplateVariable {
     /// Placeholder name, used as `{{name}}` inside the template.
     pub name: String,
@@ -69,6 +69,12 @@ impl TemplateVariable {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct PostGenerate {
+    #[serde(default)]
+    hints: Vec<String>,
+}
+
 /// A parsed `template.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct TemplateManifest {
@@ -76,8 +82,29 @@ pub struct TemplateManifest {
     #[serde(default)]
     pub description: Option<String>,
     /// Custom variables this template needs.
-    #[serde(default)]
+    #[serde(default, rename = "variable", alias = "variables")]
     pub variables: Vec<TemplateVariable>,
+    #[serde(default)]
+    post_generate: PostGenerate,
+}
+
+impl TemplateManifest {
+    /// Parse a `template.toml`'s contents. Empty/missing manifests are
+    /// represented by the caller as `TemplateManifest::default()`, not by
+    /// calling this with empty input.
+    pub fn parse(raw: &str, template_name: &str) -> Result<Self> {
+        let manifest: Self = toml::from_str(raw).map_err(|e| ForgeError::Config {
+            path: format!("templates/{template_name}/template.toml").into(),
+            message: e.to_string(),
+        })?;
+        validate_manifest(&manifest)?;
+        Ok(manifest)
+    }
+
+    /// Post-generation hints to print after `next steps`, in declared order.
+    pub fn hints(&self) -> &[String] {
+        &self.post_generate.hints
+    }
 }
 
 /// Parse a `template.toml`, rejecting manifests that redeclare a reserved
@@ -85,7 +112,11 @@ pub struct TemplateManifest {
 pub fn parse_manifest(raw: &str) -> Result<TemplateManifest> {
     let manifest: TemplateManifest = toml::from_str(raw)
         .map_err(|e| ForgeError::Template(format!("invalid {MANIFEST_FILE}: {e}")))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
 
+fn validate_manifest(manifest: &TemplateManifest) -> Result<()> {
     let mut seen: Vec<&str> = Vec::new();
     for var in &manifest.variables {
         if var.name.trim().is_empty() {
@@ -107,7 +138,7 @@ pub fn parse_manifest(raw: &str) -> Result<TemplateManifest> {
         }
         seen.push(&var.name);
     }
-    Ok(manifest)
+    Ok(())
 }
 
 /// Parse one `--var name=value` pair.
@@ -206,6 +237,7 @@ pub fn resolve_variables(
     Ok(resolved)
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -213,6 +245,7 @@ mod tests {
         TemplateManifest {
             description: None,
             variables: vars.to_vec(),
+            post_generate: PostGenerate::default(),
         }
     }
 
@@ -321,6 +354,45 @@ default = "TKN"
             "{err}"
         );
     }
+    #[test]
+    fn missing_manifest_is_default() {
+        let m = TemplateManifest::default();
+        assert_eq!(m.description, None);
+        assert!(m.variables.is_empty());
+        assert!(m.hints().is_empty());
+    }
+
+    #[test]
+    fn parses_description_and_variables() {
+        let raw = r#"
+description = "SEP-41 fungible token"
+
+[[variable]]
+name = "token_symbol"
+prompt = "Token symbol"
+default = "MYT"
+
+[[variable]]
+name = "token_decimals"
+prompt = "Decimals"
+default = "7"
+
+[post_generate]
+hints = ["deploy with --decimals 7", "run cargo test first"]
+"#;
+        let m = TemplateManifest::parse(raw, "token").unwrap();
+        assert_eq!(m.description.as_deref(), Some("SEP-41 fungible token"));
+        assert_eq!(m.variables.len(), 2);
+        assert_eq!(m.variables[0].name, "token_symbol");
+        assert_eq!(m.variables[0].default.as_deref(), Some("MYT"));
+        assert_eq!(
+            m.hints(),
+            &[
+                "deploy with --decimals 7".to_string(),
+                "run cargo test first".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn supplied_values_win_over_defaults_and_prompts() {
@@ -390,5 +462,18 @@ default = "TKN"
         )
         .unwrap();
         assert_eq!(resolved["extra"], "x");
+    }
+
+    #[test]
+    fn variables_and_hints_default_to_empty() {
+        let m = TemplateManifest::parse(r#"description = "x""#, "x").unwrap();
+        assert!(m.variables.is_empty());
+        assert!(m.hints().is_empty());
+    }
+
+    #[test]
+    fn invalid_toml_is_a_config_error() {
+        let err = TemplateManifest::parse("not [valid", "token").unwrap_err();
+        assert!(matches!(err, ForgeError::Config { .. }));
     }
 }
