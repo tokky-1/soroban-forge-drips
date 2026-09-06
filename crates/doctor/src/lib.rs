@@ -132,6 +132,22 @@ pub fn parse_semverish(version: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+fn stellar_cli_version(line: &str) -> Option<(u32, u32, u32)> {
+    line.split_whitespace()
+        .find_map(|word| parse_semverish(word))
+}
+
+fn known_broken_stellar_cli_replacement(line: &str) -> Option<&'static str> {
+    let version = stellar_cli_version(line)?;
+    match version {
+        (27, 0, 0) => Some("27.0.1"),
+        (27, 0, 1) => Some("27.1.0"),
+        (28, 0, 0) => Some("28.0.1"),
+        (29, 0, 0) => Some("29.0.1"),
+        _ => None,
+    }
+}
+
 /// Extract the declared `soroban-sdk` version from a parsed manifest.
 ///
 /// Outer `Option`: whether the manifest declares a `soroban-sdk` dependency
@@ -326,6 +342,104 @@ pub fn toolchain_check(project_dir: &Path) -> Check {
     classify_toolchain(rustup_line.as_deref(), rustc_line.as_deref())
 }
 
+fn installed_targets_for_toolchain(toolchain: &str) -> Option<Vec<String>> {
+    let output = std::process::Command::new("rustup")
+        .args(["target", "list", "--installed", "--toolchain", toolchain])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn active_toolchain(project_dir: &Path) -> Option<String> {
+    capture_in("rustup", &["show", "active-toolchain"], project_dir)
+        .or_else(|| capture("rustup", &["show", "active-toolchain"]))
+        .and_then(|line| line.split_whitespace().next().map(str::to_owned))
+}
+
+fn wasm32_target_check(project_dir: &Path) -> Check {
+    let active = active_toolchain(project_dir);
+    let active_toolchain_name = active.as_deref().unwrap_or("stable");
+
+    match capture("rustup", &["toolchain", "list"]) {
+        Some(toolchains) => {
+            let other_toolchains = toolchains
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|toolchain| Some(*toolchain) != active.as_deref())
+                .collect::<Vec<_>>();
+
+            if let Some(targets) = active.as_deref().and_then(installed_targets_for_toolchain) {
+                if targets.iter().any(|t| t == "wasm32v1-none") {
+                    return Check {
+                        name: "wasm32v1-none target",
+                        status: Status::Pass,
+                        detail: format!("installed for {active_toolchain_name}"),
+                        fix: None,
+                    };
+                }
+            }
+
+            if let Some(other) = other_toolchains.iter().find(|toolchain| {
+                installed_targets_for_toolchain(toolchain)
+                    .map(|targets| targets.iter().any(|t| t == "wasm32v1-none"))
+                    .unwrap_or(false)
+            }) {
+                let fix =
+                    format!("rustup target add --toolchain {active_toolchain_name} wasm32v1-none");
+                return Check {
+                    name: "wasm32v1-none target",
+                    status: Status::Fail,
+                    detail: format!(
+                        "installed for {other}, active toolchain is {active_toolchain_name}; exact fix: {fix}"
+                    ),
+                    fix: Some("rustup target add wasm32v1-none"),
+                };
+            }
+
+            if active.is_some() {
+                let fix =
+                    format!("rustup target add --toolchain {active_toolchain_name} wasm32v1-none");
+                return Check {
+                    name: "wasm32v1-none target",
+                    status: Status::Fail,
+                    detail: format!("not installed for {active_toolchain_name}; exact fix: {fix}"),
+                    fix: Some("rustup target add wasm32v1-none"),
+                };
+            }
+        }
+        None => {
+            return Check {
+                name: "wasm32v1-none target",
+                status: Status::Warn,
+                detail: "rustup not found — could not verify".into(),
+                fix: Some(
+                    "install rustup (https://rustup.rs), then: rustup target add wasm32v1-none",
+                ),
+            };
+        }
+    }
+
+    Check {
+        name: "wasm32v1-none target",
+        status: Status::Fail,
+        detail: "not installed".into(),
+        fix: Some("rustup target add wasm32v1-none"),
+    }
+}
+
 /// Classify a git identity probe into a report line (issue #71).
 ///
 /// `new` initializes a git repo, and the first commit fails confusingly when
@@ -382,7 +496,17 @@ pub fn rpc_connectivity_check(url: &str) -> Check {
     // -s silent, -o /dev/null discard body, -w write status code,
     // --max-time 5 abort after 5 s, -L follow redirects.
     let output = std::process::Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", "-L", url])
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "-L",
+            url,
+        ])
         .output();
     let elapsed_ms = start.elapsed().as_millis();
     match output {
@@ -401,7 +525,9 @@ pub fn rpc_connectivity_check(url: &str) -> Check {
                     name: "testnet RPC",
                     status: Status::Warn,
                     detail: format!("{url} — HTTP {code} ({elapsed_ms} ms)"),
-                    fix: Some("check your network connection or configure a different RPC endpoint"),
+                    fix: Some(
+                        "check your network connection or configure a different RPC endpoint",
+                    ),
                 }
             }
         }
@@ -428,10 +554,7 @@ pub fn release_profile_checks(project_dir: &Path) -> Vec<Check> {
         Ok(v) => v,
         Err(_) => return vec![],
     };
-    let profile_release = match manifest
-        .get("profile")
-        .and_then(|p| p.get("release"))
-    {
+    let profile_release = match manifest.get("profile").and_then(|p| p.get("release")) {
         Some(t) => t,
         None => {
             // No [profile.release] at all — warn for all three settings.
@@ -549,6 +672,42 @@ pub fn wasm_build_check(project_dir: &Path) -> Option<Check> {
     })
 }
 
+/// Warn when `Cargo.toml` has been changed since the lockfile was updated.
+///
+/// A missing lockfile is checked separately: the project is not stale, it just
+/// doesn't have a lockfile to compare yet. This keeps the warning focused and
+/// avoids double-reporting the same issue.
+pub fn cargo_lock_check(project_dir: &Path) -> Option<Check> {
+    let cargo_toml = project_dir.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        return None;
+    }
+
+    let cargo_lock = project_dir.join("Cargo.lock");
+    if !cargo_lock.is_file() {
+        return Some(Check {
+            name: "Cargo.lock",
+            status: Status::Warn,
+            detail: "missing; run cargo check to generate it".into(),
+            fix: Some("run cargo check to generate Cargo.lock"),
+        });
+    }
+
+    let toml_mtime = std::fs::metadata(cargo_toml).ok()?.modified().ok()?;
+    let lock_mtime = std::fs::metadata(cargo_lock).ok()?.modified().ok()?;
+    if toml_mtime > lock_mtime {
+        Some(Check {
+            name: "Cargo.lock",
+            status: Status::Warn,
+            detail: "Cargo.toml is newer than Cargo.lock; run cargo update -w or cargo check"
+                .into(),
+            fix: Some("run cargo update -w (or cargo check) to refresh Cargo.lock"),
+        })
+    } else {
+        None
+    }
+}
+
 /// Run all environment checks.
 pub fn run_checks() -> Vec<Check> {
     run_checks_with_network(true)
@@ -596,34 +755,6 @@ pub fn run_checks_with_network(allow_network: bool) -> Vec<Check> {
         },
     });
 
-    // wasm32v1-none target.
-    let installed_targets = std::process::Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    checks.push(match installed_targets {
-        Some(targets) if targets.lines().any(|t| t.trim() == "wasm32v1-none") => Check {
-            name: "wasm32v1-none target",
-            status: Status::Pass,
-            detail: "installed".into(),
-            fix: None,
-        },
-        Some(_) => Check {
-            name: "wasm32v1-none target",
-            status: Status::Fail,
-            detail: "not installed".into(),
-            fix: Some("rustup target add wasm32v1-none"),
-        },
-        None => Check {
-            name: "wasm32v1-none target",
-            status: Status::Warn,
-            detail: "rustup not found — could not verify".into(),
-            fix: Some("install rustup (https://rustup.rs), then: rustup target add wasm32v1-none"),
-        },
-    });
-
     // wasm32-unknown-unknown target (issue #45).
     //
     // Some toolchains and projects still require the older `wasm32-unknown-unknown`
@@ -661,21 +792,31 @@ pub fn run_checks_with_network(allow_network: bool) -> Vec<Check> {
         });
     }
 
-    // stellar-cli — presence and minimum version (issue #47).
+    // stellar-cli — presence, minimum version and known-bad releases.
     checks.push(match capture("stellar", &["--version"]) {
-        Some(line) if version_at_least(&line, MIN_STELLAR) => Check {
-            name: "stellar-cli",
-            status: Status::Pass,
-            detail: line,
-            fix: None,
-        },
+        Some(line) if version_at_least(&line, MIN_STELLAR) => {
+            if let Some(recommended) = known_broken_stellar_cli_replacement(&line) {
+                Check {
+                    name: "stellar-cli",
+                    status: Status::Warn,
+                    detail: format!("{line} (known-broken release; upgrade to {recommended})"),
+                    fix: Some(
+                        "upgrade: cargo install --locked stellar-cli  (or: brew upgrade stellar-cli)",
+                    ),
+                }
+            } else {
+                Check {
+                    name: "stellar-cli",
+                    status: Status::Pass,
+                    detail: line,
+                    fix: None,
+                }
+            }
+        }
         Some(line) => Check {
             name: "stellar-cli",
             status: Status::Warn,
-            detail: format!(
-                "{line} (need >= {}.{}.0)",
-                MIN_STELLAR.0, MIN_STELLAR.1
-            ),
+            detail: format!("{line} (need >= {}.{}.0)", MIN_STELLAR.0, MIN_STELLAR.1),
             fix: Some(
                 "upgrade: cargo install --locked stellar-cli  (or: brew upgrade stellar-cli)",
             ),
@@ -776,7 +917,7 @@ pub struct Remedy {
     /// The program to invoke, e.g. `rustup` or `cargo`.
     pub program: &'static str,
     /// Arguments passed to `program`.
-    pub args: &'static [&'static str],
+    pub args: Vec<String>,
 }
 
 impl Remedy {
@@ -802,15 +943,29 @@ pub fn remedy(check: &Check) -> Option<Remedy> {
         return None;
     }
     match check.name {
-        "wasm32v1-none target" => Some(Remedy {
-            check: check.name,
-            program: "rustup",
-            args: &["target", "add", "wasm32v1-none"],
-        }),
+        "wasm32v1-none target" => {
+            let args = check
+                .detail
+                .split("exact fix: ")
+                .last()
+                .filter(|cmd| cmd.starts_with("rustup "))
+                .map(|cmd| {
+                    cmd.split_whitespace()
+                        .skip(1)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec!["target".into(), "add".into(), "wasm32v1-none".into()]);
+            Some(Remedy {
+                check: check.name,
+                program: "rustup",
+                args,
+            })
+        }
         "stellar-cli" => Some(Remedy {
             check: check.name,
             program: "cargo",
-            args: &["install", "--locked", "stellar-cli"],
+            args: vec!["install".into(), "--locked".into(), "stellar-cli".into()],
         }),
         _ => None,
     }
@@ -866,7 +1021,7 @@ pub fn format_fix_summary(outcomes: &[FixOutcome]) -> String {
 fn run_remedy(remedy: &Remedy) -> FixOutcome {
     let command = remedy.command_line();
     let status = std::process::Command::new(remedy.program)
-        .args(remedy.args)
+        .args(remedy.args.iter().map(String::as_str))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -918,6 +1073,45 @@ fn confirm(prompt: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+fn config_network_url(config: Option<&soroban_forge_core::config::ForgeConfig>) -> Option<String> {
+    let config = config?;
+    if let Some(url) = config.network.rpc_url.as_deref() {
+        return Some(url.to_owned());
+    }
+    let name = config.network.name.as_deref()?;
+    match name {
+        "testnet" => Some(TESTNET_RPC_URL.to_string()),
+        "futurenet" => Some("https://rpc-futurenet.stellar.org".to_string()),
+        "localnet" => Some("http://localhost:8000/soroban/rpc".to_string()),
+        _ => Some(name.to_string()),
+    }
+}
+
+fn normalize_check_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+        .replace(" ", "-")
+        .replace("_", "-")
+}
+
+fn list_check_names() -> Vec<&'static str> {
+    vec![
+        "rustc",
+        "cargo",
+        "wasm32v1-none-target",
+        "wasm32-unknown-unknown",
+        "stellar-cli",
+        "testnet-rpc",
+        "git",
+        "git-identity",
+        "docker",
+        "toolchain",
+        "soroban-sdk",
+        "release-opt-level",
+        "release-lto",
+        "release-codegen-units",
+    ]
+}
+
 /// The `doctor` subcommand.
 pub struct DoctorPlugin;
 
@@ -931,6 +1125,7 @@ impl DoctorPlugin {
     fn gather_checks(&self, ctx: &ForgeContext, do_build: bool) -> Vec<Check> {
         let mut checks = run_checks_with_network(!ctx.offline);
         checks.push(toolchain_check(&ctx.cwd)); // issue #109
+        checks.push(wasm32_target_check(&ctx.cwd)); // issue #251
         if ctx.offline {
             checks.push(Check {
                 name: "testnet RPC",
@@ -938,8 +1133,18 @@ impl DoctorPlugin {
                 detail: "skipped (--offline)".into(),
                 fix: None,
             });
+        let mut checks = Vec::new();
+        if !ctx.offline {
+            let url = config_network_url(ctx.config.as_ref())
+                .unwrap_or_else(|| TESTNET_RPC_URL.to_string());
+            checks.push(rpc_connectivity_check(&url));
         }
+        checks.extend(run_checks_with_network(false));
+        checks.push(toolchain_check(&ctx.cwd)); // issue #109
         if let Some(check) = sdk_version_check(&ctx.cwd) {
+            checks.push(check);
+        }
+        if let Some(check) = cargo_lock_check(&ctx.cwd) {
             checks.push(check);
         }
         // Release profile size-optimisation checks (issue #48).
@@ -1003,15 +1208,10 @@ impl ForgePlugin for DoctorPlugin {
                     .action(ArgAction::SetTrue)
                     .help("Output check results as JSON"),
             )
-            .arg(
-                Arg::new("fix")
-                    .long("fix")
-                    .action(ArgAction::SetTrue)
-                    .help(
-                        "Attempt to install missing toolchain components \
+            .arg(Arg::new("fix").long("fix").action(ArgAction::SetTrue).help(
+                "Attempt to install missing toolchain components \
                          (rustup target add, cargo install), then re-check",
-                    ),
-            )
+            ))
             .arg(
                 Arg::new("yes")
                     .long("yes")
@@ -1028,6 +1228,18 @@ impl ForgePlugin for DoctorPlugin {
                          of the current project and report success/failure with timing",
                     ),
             )
+            .arg(
+                Arg::new("check")
+                    .long("check")
+                    .value_name("NAME")
+                    .help("Run only the named check (use --list-checks to see valid choices)"),
+            )
+            .arg(
+                Arg::new("list-checks")
+                    .long("list-checks")
+                    .action(ArgAction::SetTrue)
+                    .help("Print the available check names and exit"),
+            )
     }
 
     fn run(&self, matches: &ArgMatches, ctx: &ForgeContext) -> Result<()> {
@@ -1035,6 +1247,23 @@ impl ForgePlugin for DoctorPlugin {
         let do_fix = matches.get_flag("fix");
         let do_build = matches.get_flag("build");
         let assume_yes = ctx.yes || matches.get_flag("yes");
+        let selected_check = matches.get_one::<String>("check").map(String::as_str);
+        let list_checks = matches.get_flag("list-checks");
+
+        if list_checks {
+            println!("{}", list_check_names().join("\n"));
+            return Ok(());
+        }
+
+        if let Some(selected) = selected_check {
+            let normalized = normalize_check_name(selected);
+            if !list_check_names().iter().any(|n| normalize_check_name(n) == normalized) {
+                return Err(ForgeError::InvalidArgument(format!(
+                    "unknown doctor check `{selected}` (valid: {})",
+                    list_check_names().join(", ")
+                )));
+            }
+        }
 
         if ctx.offline && do_fix {
             return Err(ForgeError::InvalidArgument(
@@ -1044,11 +1273,16 @@ impl ForgePlugin for DoctorPlugin {
         }
 
         let mut checks = self.gather_checks(ctx, do_build);
+        if let Some(selected) = selected_check {
+            checks = checks
+                .into_iter()
+                .filter(|check| normalize_check_name(check.name) == normalize_check_name(selected))
+                .collect();
+        }
 
         if do_fix {
             let remedies = fixable_remedies(&checks);
-            if !remedies.is_empty()
-                && self.confirm_fix(&remedies, use_json, assume_yes, ctx.quiet)
+            if !remedies.is_empty() && self.confirm_fix(&remedies, use_json, assume_yes, ctx.quiet)
             {
                 let outcomes = apply_remedies(&remedies);
                 if !use_json && !ctx.quiet {
@@ -1057,6 +1291,12 @@ impl ForgePlugin for DoctorPlugin {
                 // Re-check so the final report reflects the fixes; any
                 // non-fixable issues (and any remedy that failed) remain.
                 checks = self.gather_checks(ctx, do_build);
+                if let Some(selected) = selected_check {
+                    checks = checks
+                        .into_iter()
+                        .filter(|check| normalize_check_name(check.name) == normalize_check_name(selected))
+                        .collect();
+                }
             }
         }
 
@@ -1185,6 +1425,13 @@ mod tests {
     }
 
     #[test]
+    fn known_bad_stellar_cli_versions_warn_with_recommendation() {
+        assert_eq!(known_broken_stellar_cli_replacement("stellar-cli 27.0.0"), Some("27.0.1"));
+        assert_eq!(known_broken_stellar_cli_replacement("stellar-cli 28.0.0"), Some("28.0.1"));
+        assert_eq!(known_broken_stellar_cli_replacement("stellar-cli 26.1.0"), None);
+    }
+
+    #[test]
     fn pinned_sdk_version_is_parseable() {
         assert!(
             parse_semverish(SOROBAN_SDK_VERSION).is_some(),
@@ -1260,6 +1507,7 @@ mod tests {
         assert_eq!(check.status, Status::Warn);
         assert!(check.detail.contains("no version specified"));
     }
+
     #[test]
     fn json_report_formatting() {
         let checks = vec![
@@ -1319,10 +1567,7 @@ mod tests {
 
     #[test]
     fn toolchain_reports_stable_channel() {
-        let check = classify_toolchain(
-            Some("stable-x86_64-unknown-linux-gnu (default)"),
-            None,
-        );
+        let check = classify_toolchain(Some("stable-x86_64-unknown-linux-gnu (default)"), None);
         assert_eq!(check.status, Status::Pass);
         assert!(check.detail.contains("stable-x86_64-unknown-linux-gnu"));
         assert!(check.detail.contains("channel: stable"));
@@ -1336,6 +1581,68 @@ mod tests {
             None,
         );
         assert!(check.detail.contains("channel: nightly"));
+    }
+
+    #[test]
+    fn fixable_remedies_skip_already_fixed_checks() {
+        let checks = vec![
+            Check {
+                name: "wasm32v1-none target",
+                status: Status::Pass,
+                detail: "installed".into(),
+                fix: None,
+            },
+            Check {
+                name: "stellar-cli",
+                status: Status::Fail,
+                detail: "not found".into(),
+                fix: Some("install: brew install stellar-cli"),
+            },
+        ];
+
+        let remedies = fixable_remedies(&checks);
+        assert_eq!(remedies.len(), 1);
+        assert_eq!(remedies[0].check, "stellar-cli");
+    }
+
+    #[test]
+    fn partial_fix_keeps_remaining_failures_for_re_run() {
+        let checks = vec![
+            Check {
+                name: "wasm32v1-none target",
+                status: Status::Fail,
+                detail: "not installed".into(),
+                fix: Some("rustup target add wasm32v1-none"),
+            },
+            Check {
+                name: "stellar-cli",
+                status: Status::Fail,
+                detail: "not found".into(),
+                fix: Some("install: brew install stellar-cli"),
+            },
+        ];
+
+        let first = fixable_remedies(&checks);
+        assert_eq!(first.len(), 2);
+
+        let next = vec![
+            Check {
+                name: "wasm32v1-none target",
+                status: Status::Pass,
+                detail: "installed".into(),
+                fix: None,
+            },
+            Check {
+                name: "stellar-cli",
+                status: Status::Fail,
+                detail: "not found".into(),
+                fix: Some("install: brew install stellar-cli"),
+            },
+        ];
+
+        let remaining = fixable_remedies(&next);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check, "stellar-cli");
     }
 
     #[test]

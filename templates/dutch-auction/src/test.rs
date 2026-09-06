@@ -21,6 +21,7 @@ fn make_token(env: &Env) -> Tok<'_> {
     }
 }
 
+#[allow(dead_code)]
 struct TestContext<'a> {
     contract: DutchAuctionContractClient<'a>,
     asset_token: Tok<'a>,

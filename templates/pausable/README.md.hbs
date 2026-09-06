@@ -1,0 +1,67 @@
+# {{project_name}}
+
+A pausable contract — a minimal circuit breaker — for Stellar/Soroban,
+generated with [soroban-forge](https://github.com/soroban-forge-labs/soroban-forge)
+from the `pausable` template.
+
+The admin address fixed at deploy time can `pause` and `unpause` the contract.
+While it is paused, every guarded entrypoint rejects the call with
+`Error::Paused`; read-only entrypoints keep working so state stays inspectable
+during an incident.
+
+## Entrypoints
+
+| entrypoint | guarded | who |
+|------------|---------|-----|
+| `pause` | – | admin |
+| `unpause` | – | admin |
+| `increment(by)` | yes | anyone |
+| `reset` | yes | admin |
+| `count`, `is_paused`, `admin` | – | anyone (read-only) |
+
+`increment` and `reset` stand in for whatever your contract actually does.
+Guarding one of your own entrypoints is one line at the top of it — return
+`Result<_, Error>` from the entrypoint and let `?` propagate the rejection:
+
+```rust
+pub fn do_something(env: Env) -> Result<(), Error> {
+    require_not_paused(&env)?;
+    // ...
+    Ok(())
+}
+```
+
+Note that `reset` is admin-only *and* guarded: the pause check runs first, so a
+paused contract stays frozen even for the admin.
+
+## Commands
+
+```sh
+# Run unit tests
+cargo test
+
+# Build the release WASM file
+stellar contract build
+
+# Deploy to Testnet — the constructor takes the admin address
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/{{crate_name}}.wasm \
+  --source-account <your-identity> \
+  --network testnet \
+  -- --admin <ADMIN_ADDRESS>
+
+# Trip the breaker
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source-account <ADMIN_IDENTITY> \
+  --network testnet \
+  -- pause
+```
+
+## Notes
+
+- **Admin key security**: whoever controls the admin address can freeze the
+  contract. Consider a multi-sig or a dedicated pauser role rather than a
+  single key.
+- **Pausing is not a fix**: it buys time. Pair it with the `upgradeable`
+  template if you need to ship a corrected contract while paused.

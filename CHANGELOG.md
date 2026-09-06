@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- New `pausable` template — a minimal circuit breaker: an admin fixed at
+  deploy time can `pause`/`unpause`, and guarded entrypoints reject calls with
+  `Error::Paused` while paused
 - `soroban-forge new --license apache-2.0|mit|unlicense` writes a LICENSE
   file (author and year filled in) and sets the matching `license` field in
   the generated `Cargo.toml`. Omitting the flag keeps prior behaviour: no
