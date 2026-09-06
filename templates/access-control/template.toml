@@ -5,4 +5,4 @@ hints = [
   "the constructor takes admin — that address receives ADMIN_ROLE and can grant every other role",
   "gate your own entrypoint with `require_role(&env, &caller, &YOUR_ROLE)` — see \"Gating your own entrypoint\" in README.md",
   "the mint/burn ledger is a demo of two gated entrypoints; delete it and keep the role primitives",
-]
+] 
